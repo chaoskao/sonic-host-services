@@ -1027,7 +1027,7 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
         # First define constants for interface tables near the top of the file
         INTERFACE_TABLES = [
             swsscommon.CFG_INTF_TABLE_NAME,
-            swsscommon.CFG_VLAN_INTF_TABLE_NAME, 
+            swsscommon.CFG_VLAN_INTF_TABLE_NAME,
             swsscommon.CFG_LAG_INTF_TABLE_NAME,
             swsscommon.CFG_LOOPBACK_INTERFACE_TABLE_NAME,
             swsscommon.CFG_VLAN_SUB_INTF_TABLE_NAME
@@ -1058,7 +1058,7 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
                 config_db_subscriber_table_map[namespace].append(subscribe_intf_table)
 
         # Get the ACL rule table seprator
-        acl_rule_table_seprator = subscribe_acl_rule_table.getTableNameSeparator()
+        acl_rule_table_separator = subscribe_acl_rule_table.getTableNameSeparator()
 
         # Loop on select to see if any event happen on state db or config db of any namespace
         while True:
@@ -1129,14 +1129,21 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
                     # Pop of table that does not have data so break
                     if key == '':
                         break
+
+                    table_name = table.getTableName()
+
+                    if table_name == swsscommon.CFG_INTF_TABLE_NAME:
+                        if acl_rule_table_separator in key:
+                            ctrl_plane_acl_notification.add(namespace)
+
                     # ACL Table notification. We will take Control Plane ACTION for any ACL Table Event
                     # This can be optimize further but we should not have many acl table set/del events in normal
                     # scenario
-                    if acl_rule_table_seprator not in key:
+                    if acl_rule_table_separator not in key:
                         ctrl_plane_acl_notification.add(namespace)
                     # Check ACL Rule notification and make sure Rule point to ACL Table which is Controlplane
                     else:
-                        acl_table = key.split(acl_rule_table_seprator)[0]
+                        acl_table = key.split(acl_rule_table_separator)[0]
                         is_acl_table = self.config_db_map[namespace].get_table(self.ACL_TABLE).get(acl_table)
                         if not is_acl_table:
                             self.log_warning("Ignoring for non-existent ACL table '{}'".format(acl_table))
