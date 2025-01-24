@@ -1086,7 +1086,7 @@ class NtpCfg(object):
     def ntp_srv_key_update(self, ntp_servers: dict, ntp_keys: dict):
         """Update NTP server/key configuration
 
-        The tables holds only NTP servers config and/or NTP authentication keys 
+        The tables holds only NTP servers config and/or NTP authentication keys
         config, so any change to those tables should cause NTP config reload.
         It does not make sense to handle each of the separately. NTP config
         reload takes whole configuration, so once got to this handler - cache
@@ -1274,6 +1274,13 @@ class MgmtIfaceCfg(object):
         self.iface_config_data = {}
         self.mgmt_vrf_enabled = ''
 
+    def __get_intf_name(self, key):
+        if isinstance(key, tuple) and key:
+            intf = key[0]
+        else:
+            intf = key
+        return intf
+
     def load(self, mgmt_iface={}, mgmt_vrf={}):
         # Get initial data
         self.iface_config_data = mgmt_iface
@@ -1333,27 +1340,44 @@ class MgmtIfaceCfg(object):
 
         # Remove mgmt if route
         if enabled == 'true':
-            """
-            The regular expression for grep in below cmd is to match eth0 line
-            in /proc/net/route, sample file:
-            $ cat /proc/net/route
-            Iface   Destination     Gateway         Flags   RefCnt  Use
-            eth0    00000000        01803B0A        0003    0       0
-            #################### Line break here ####################
-            Metric  Mask            MTU     Window  IRTT
-            202     00000000        0       0       0
-            """
-            try:
-                cmd0 = ['cat', '/proc/net/route']
-                cmd1 = ['grep', '-E', r"eth0\s+00000000\s+[0-9A-Z]+\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+202"]
-                cmd2 = ['wc', '-l']
-                run_cmd_pipe(cmd0, cmd1, cmd2, True, True)
-            except subprocess.CalledProcessError:
-                syslog.syslog(syslog.LOG_ERR, 'MgmtIfaceCfg: Could not delete '
-                                              'eth0 route')
-                return
+            mgmt_intfs = list(set(intf_name for key in self.iface_config_data if (intf_name := self.__get_intf_name(key)) is not None))
 
-            run_cmd(["ip", "-4", "route", "del", "default", "dev", "eth0", "metric", "202"], False)
+            for mgmt_intf in mgmt_intfs:
+                self.flush_legacy_routes_from_mgmt_interface(mgmt_intf, 4)
+                self.flush_legacy_routes_from_mgmt_interface(mgmt_intf, 6)
+
+        # Update cache
+        self.mgmt_vrf_enabled = enabled
+
+    def flush_legacy_routes_from_mgmt_interface(self, iface, ip_version):
+        """Flush all routes (including local) from the management interface in default VRF.
+
+        When moving the interface to mgmt VRF, all routes in default VRF become obsolete.
+        This function ensures no stale routes remain, avoiding conflicts in routing policies.
+
+        Args:
+            iface (str): Management interface name (e.g., eth0, eth0.10).
+            ip_version (int): IP protocol version (4 or 6).
+        """
+        family = '-4' if ip_version == 4 else '-6'
+        try:
+            # Flush all routes (including local) from the interface in default VRF.
+            # Rationale: After moving to mgmt VRF, these routes are no longer valid.
+            subprocess.run(
+                ["ip", family, "route", "flush", "dev", iface],
+                check=True,
+                stderr=subprocess.PIPE
+            )
+            syslog.syslog(syslog.LOG_INFO,
+                f"[Success] Flushed all {family} routes on {iface} in default VRF"
+            )
+        except subprocess.CalledProcessError as e:
+            # Handle "No such process" (no routes to flush)
+            if "No such process" not in e.stderr.decode():
+                syslog.syslog(syslog.LOG_ERR,
+                    f"[Failed] Flushing routes on {iface}: {e.stderr.decode()}"
+                )
+
 
 class RSyslogCfg(object):
     """Remote syslog config daemon
