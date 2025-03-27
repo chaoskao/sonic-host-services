@@ -17,6 +17,7 @@ try:
     import sys
     import threading
     import time
+    import json
     from sonic_py_common.general import getstatusoutput_noshell_pipe
     from sonic_py_common import daemon_base, device_info, multi_asic
     from swsscommon import swsscommon
@@ -28,6 +29,8 @@ VERSION = "1.0"
 SYSLOG_IDENTIFIER = "caclmgrd"
 
 DEFAULT_NAMESPACE = ''
+
+HOOK_RULES = "/etc/sonic/iptables.json"
 
 
 # ========================== Helper Functions =========================
@@ -323,6 +326,28 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
             allow_internal_chassis_midplane_traffic.append(['iptables', '-A', 'INPUT', '-i', chassis_midplane_dev_name, '-j', 'ACCEPT'])
 
         return allow_internal_chassis_midplane_traffic
+
+    def generate_hook_iptables_commands(self):
+        custom_cmds = []
+        try:
+            with open(HOOK_RULES, 'r') as f:
+                data = f.read()
+                rules_json = json.loads(data)
+
+                if 'ipv4' in rules_json and isinstance(rules_json['ipv4'], list):
+                    for r in rules_json['ipv4']:
+                        cmd = 'iptables {}'.format(r)
+                        custom_cmds.append(cmd.split())
+
+                if 'ipv6' in rules_json and isinstance(rules_json['ipv6'], list):
+                    for r in rules_json['ipv6']:
+                        cmd = 'ip6tables {}'.format(r)
+                        custom_cmds.append(cmd.split())
+
+        except Exception:
+            custom_cmds = []
+
+        return custom_cmds
 
     def generate_allow_internal_docker_ip_traffic_commands(self, namespace):
         allow_internal_docker_ip_cmds = []
@@ -630,6 +655,11 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
         # TODO: Determine BGP ACLs based on configured device sessions, and remove this blanket acceptance
         iptables_cmds.append(self.iptables_cmd_ns_prefix[namespace] + ['iptables', '-A', 'INPUT', '-p', 'tcp', '--dport', '179', '-j', 'ACCEPT'])
         iptables_cmds.append(self.iptables_cmd_ns_prefix[namespace] + ['ip6tables', '-A', 'INPUT', '-p', 'tcp', '--dport', '179', '-j', 'ACCEPT'])
+
+        #
+        # This is for hook method to add custom cacl rule.
+        #
+        iptables_cmds += self.generate_hook_iptables_commands()
 
         # Get current ACL tables and rules from Config DB
 
@@ -1081,7 +1111,8 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
                     # Check ACL Rule notification and make sure Rule point to ACL Table which is Controlplane
                     else:
                         acl_table = key.split(acl_rule_table_seprator)[0]
-                        if self.config_db_map[namespace].get_table(self.ACL_TABLE)[acl_table]["type"] == self.ACL_TABLE_TYPE_CTRLPLANE:
+                        acl_table_data = self.config_db_map[namespace].get_table(self.ACL_TABLE).get(acl_table, {})
+                        if acl_table_data.get("type") == self.ACL_TABLE_TYPE_CTRLPLANE:
                             ctrl_plane_acl_notification.add(namespace)
 
             # Update the Control Plane ACL of the namespace that got config db acl table event
