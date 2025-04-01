@@ -274,7 +274,8 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
             "LOOPBACK_INTERFACE",
             "VLAN_INTERFACE",
             "PORTCHANNEL_INTERFACE",
-            "INTERFACE"
+            "INTERFACE",
+            "VLAN_SUB_INTERFACE"
         ]
 
         block_ip2me_cmds = []
@@ -289,15 +290,12 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
 
                     iface_name, iface_cidr = key
                     ip_ntwrk = ipaddress.ip_network(iface_cidr, strict=False)
-
-                    # For VLAN interfaces, the IP address we want to block is the default gateway (i.e.,
-                    # the first available host IP address of the VLAN subnet)
-                    ip_addr = next(ip_ntwrk.hosts()) if iface_table_name == "VLAN_INTERFACE" else ip_ntwrk.network_address
+                    block_ip_addr = ipaddress.ip_address(iface_cidr.split('/')[0])
 
                     if isinstance(ip_ntwrk, ipaddress.IPv4Network):
-                        block_ip2me_cmds.append(self.iptables_cmd_ns_prefix[namespace] + ['iptables', '-A', 'INPUT', '-d', '{}/{}'.format(ip_addr, ip_ntwrk.max_prefixlen), '-j', 'DROP'])
+                        block_ip2me_cmds.append(self.iptables_cmd_ns_prefix[namespace] + ['iptables', '-A', 'INPUT', '-d', '{}/{}'.format(block_ip_addr, ip_ntwrk.max_prefixlen), '-j', 'DROP'])
                     elif isinstance(ip_ntwrk, ipaddress.IPv6Network):
-                        block_ip2me_cmds.append(self.iptables_cmd_ns_prefix[namespace] + ['ip6tables', '-A', 'INPUT', '-d', '{}/{}'.format(ip_addr, ip_ntwrk.max_prefixlen), '-j', 'DROP'])
+                        block_ip2me_cmds.append(self.iptables_cmd_ns_prefix[namespace] + ['ip6tables', '-A', 'INPUT', '-d', '{}/{}'.format(block_ip_addr, ip_ntwrk.max_prefixlen), '-j', 'DROP'])
                     else:
                         self.log_warning("Unrecognized IP address type on interface '{}': {}".format(iface_name, ip_ntwrk))
 
@@ -1022,6 +1020,15 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
         # Map of Namespace <--> susbcriber table's object
         config_db_subscriber_table_map = {}
 
+        # First define constants for interface tables near the top of the file
+        INTERFACE_TABLES = [
+            swsscommon.CFG_INTF_TABLE_NAME,
+            swsscommon.CFG_VLAN_INTF_TABLE_NAME, 
+            swsscommon.CFG_LAG_INTF_TABLE_NAME,
+            swsscommon.CFG_LOOPBACK_INTERFACE_TABLE_NAME,
+            swsscommon.CFG_VLAN_SUB_INTF_TABLE_NAME
+        ]
+
         # Loop through all asic namespaces (if present) and host namespace (DEFAULT_NAMESPACE)
         for namespace in list(self.config_db_map.keys()):
             # Unconditionally update control plane ACLs once at start on given namespace
@@ -1039,6 +1046,12 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
             config_db_subscriber_table_map[namespace] = []
             config_db_subscriber_table_map[namespace].append(subscribe_acl_table)
             config_db_subscriber_table_map[namespace].append(subscribe_acl_rule_table)
+
+            # Subscribe to interface tables
+            for table_name in INTERFACE_TABLES:
+                subscribe_intf_table = swsscommon.SubscriberStateTable(acl_db_connector, table_name)
+                sel.addSelectable(subscribe_intf_table)
+                config_db_subscriber_table_map[namespace].append(subscribe_intf_table)
 
         # Get the ACL rule table seprator
         acl_rule_table_seprator = subscribe_acl_rule_table.getTableNameSeparator()
@@ -1120,8 +1133,12 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
                     # Check ACL Rule notification and make sure Rule point to ACL Table which is Controlplane
                     else:
                         acl_table = key.split(acl_rule_table_seprator)[0]
-                        acl_table_data = self.config_db_map[namespace].get_table(self.ACL_TABLE).get(acl_table, {})
-                        if acl_table_data.get("type") == self.ACL_TABLE_TYPE_CTRLPLANE:
+                        is_acl_table = self.config_db_map[namespace].get_table(self.ACL_TABLE).get(acl_table)
+                        if not is_acl_table:
+                            self.log_warning("Ignoring for non-existent ACL table '{}'".format(acl_table))
+                            continue
+
+                        if self.config_db_map[namespace].get_table(self.ACL_TABLE)[acl_table]["type"] == self.ACL_TABLE_TYPE_CTRLPLANE:
                             ctrl_plane_acl_notification.add(namespace)
 
             # Update the Control Plane ACL of the namespace that got config db acl table event
