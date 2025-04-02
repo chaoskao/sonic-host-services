@@ -580,6 +580,35 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
         iptables_cmds = []
         service_to_source_ip_map = {}
 
+        # Check if SSH, SNMP, NTP, etc are configured in control plane ACLs, then the dst port should be excluded from the whitelist
+        #     without ctrlACL - iptables -D INPUT -p tcp --sport 8888 -j ACCEPT
+        #     with ctrlACL - iptables -D INPUT -p tcp --sport 8888 -m multiport ! --dports 22,123,161 -j ACCEPT
+        acl_service_to_exclude_dst_port = set()
+        self._tables_db_info = self.config_db_map[namespace].get_table(self.ACL_TABLE)
+        self._rules_db_info = self.config_db_map[namespace].get_table(self.ACL_RULE)
+
+        # Walk the ACL tables
+        for (table_name, table_data) in self._tables_db_info.items():
+            if self._rules_db_info is None:
+                break
+            # Ignore non-control-plane ACL tables
+            if table_data["type"] == self.ACL_TABLE_TYPE_CTRLPLANE:
+                rule_exists = False
+                for ((rule_table_name, rule_id), rule_props) in self._rules_db_info.items():
+                    if rule_table_name == table_name:
+                        rule_exists = True
+                        break
+
+                if not rule_exists:
+                    continue
+
+                # Update the set with destination ports to exclude for each relevant service
+                acl_service_to_exclude_dst_port.update(
+                    port for service in table_data["services"]
+                    if service in self.ACL_SERVICES
+                    for port in self.ACL_SERVICES[service].get("dst_ports", [])
+                )
+
         # First, add iptables commands to set default policies to accept all
         # traffic. In case we are connected remotely, the connection will not
         # drop when we flush the current rules
@@ -671,7 +700,12 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
 
         # Add iptables commands to allow all incoming MCLAG traffic (tcp dport/sport 8888)
         iptables_cmds.append(self.iptables_cmd_ns_prefix[namespace] + ['iptables', '-A', 'INPUT', '-p', 'tcp', '--dport', '8888', '-j', 'ACCEPT'])
-        iptables_cmds.append(self.iptables_cmd_ns_prefix[namespace] + ['iptables', '-A', 'INPUT', '-p', 'tcp', '--sport', '8888', '-j', 'ACCEPT'])
+        #iptables_cmds.append(self.iptables_cmd_ns_prefix[namespace] + ['iptables', '-A', 'INPUT', '-p', 'tcp', '--sport', '8888', '-j', 'ACCEPT'])
+        if len(acl_service_to_exclude_dst_port) > 0:
+            iptables_cmds.append(self.iptables_cmd_ns_prefix[namespace] + ['iptables', '-A', 'INPUT', '-p', 'tcp', '--sport', '8888', '-m', 'multiport', '!','--dports', ','.join(map(str, acl_service_to_exclude_dst_port)), '-j', 'ACCEPT'])
+        else:
+            iptables_cmds.append(self.iptables_cmd_ns_prefix[namespace] + ['iptables', '-A', 'INPUT', '-p', 'tcp', '--sport', '8888', '-j', 'ACCEPT'])
+
 
         # Get current ACL tables and rules from Config DB
 
@@ -1028,7 +1062,7 @@ class ControlPlaneAclManager(daemon_base.DaemonBase):
         # First define constants for interface tables near the top of the file
         INTERFACE_TABLES = [
             swsscommon.CFG_INTF_TABLE_NAME,
-            swsscommon.CFG_VLAN_INTF_TABLE_NAME, 
+            swsscommon.CFG_VLAN_INTF_TABLE_NAME,
             swsscommon.CFG_LAG_INTF_TABLE_NAME,
             swsscommon.CFG_LOOPBACK_INTERFACE_TABLE_NAME,
             swsscommon.CFG_VLAN_SUB_INTF_TABLE_NAME
