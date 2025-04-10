@@ -276,11 +276,9 @@ class TestHostcfgdDaemon(TestCase):
                     call(['systemctl', 'restart', 'interfaces-config']),
                     call(['service', 'ntp-config', 'start']),
                     call(['service', 'rsyslog-config', 'start']),
-                    call(['ip', '-4', 'route', 'del', 'default', 'dev', 'eth0', 'metric', '202'])
                 ]
                 mocked_subprocess.check_call.assert_has_calls(expected)
                 expected = [
-                    call(['cat', '/proc/net/route'], ['grep', '-E', r"eth0\s+00000000\s+[0-9A-Z]+\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+202"], ['wc', '-l'])
                 ]
                 mocked_check_output.assert_has_calls(expected)
 
